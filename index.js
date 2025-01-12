@@ -1,13 +1,11 @@
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
-// const jwt = require("jsonwebtoken");
-// const cookieParser = require("cookie-parser");
-require("dotenv").config();
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const port = process.env.PORT || 5000;
 const app = express();
-
 app.use(express.json());
 app.use(cors());
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.73pqt.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
@@ -28,6 +26,7 @@ async function run() {
     const reviewsCollection = client.db("menuDB").collection("reviews");
     const cartsCollection = client.db("menuDB").collection("carts");
     const usersCollection = client.db("menuDB").collection("users");
+    const paymentCollection = client.db("menuDB").collection("payments");
 
     // JWT API
 
@@ -42,7 +41,6 @@ async function run() {
     // Middleware
 
     const verifyToken = (req, res, next) => {
-      console.log(req.headers.authorization);
       if (!req.headers.authorization) {
         return res.status(401).send({ message: "Unauthorized Access" });
       }
@@ -118,9 +116,45 @@ async function run() {
       res.send(result);
     });
 
-    app.post("/addMenu", async (req, res) => {
+    app.post("/menu", verifyToken, verifyAdmin, async (req, res) => {
       const query = req.body;
       const result = await menuCollection.insertOne(query);
+      res.send(result);
+    });
+
+    app.get("/menu", async (req, res) => {
+      const result = await menuCollection.find().toArray();
+      res.send(result);
+    });
+
+    app.get("/menu/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await menuCollection.findOne(query);
+      res.send(result);
+    });
+
+    app.patch("/menu/:id", async (req, res) => {
+      const item = req.body;
+      const id = req.params.id;
+      const filter = { _id: new ObjectId(id) };
+      const updatedDoc = {
+        $set: {
+          name: item.name,
+          category: item.category,
+          price: item.price,
+          recipe: item.recipe,
+          image: item.image,
+        },
+      };
+      const result = await menuCollection.updateOne(filter, updatedDoc);
+      res.send(result);
+    });
+
+    app.delete("/menu/:id", verifyToken, verifyAdmin, async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      const result = await menuCollection.deleteOne(query);
       res.send(result);
     });
 
@@ -160,6 +194,55 @@ async function run() {
       const query = { _id: new ObjectId(id) };
       const result = await cartsCollection.deleteOne(query);
       res.send(result);
+    });
+
+    // Payment related API
+
+    app.post("/create-payment-intent", async (req, res) => {
+      const { price } = req.body;
+      const amount = parseInt(price * 100);
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: amount,
+        currency: "usd",
+        payment_method_types: ["card"],
+      });
+      res.send({
+        clientSecret: paymentIntent.client_secret,
+      });
+    });
+
+    app.post("/payments", async (req, res) => {
+      const payment = req.body;
+      const paymentResult = await paymentCollection.insertOne(payment);
+
+      const query = {
+        _id: {
+          $in: payment.ids.map((id) => new ObjectId(id)),
+        },
+      };
+      const deleteCart = await cartsCollection.deleteMany(query);
+      res.send({ paymentResult, deleteCart });
+    });
+
+    app.get("/payments/:email", verifyToken, async (req, res) => {
+      const query = { email: req.params.email };
+      if (req.params.email !== req.decoded.email) {
+        return res.status(403).send({ message: "Unauthorized Access" });
+      }
+      const result = await paymentCollection.find(query).toArray();
+      res.send(result);
+    });
+
+    // admin stats
+    app.get("/admin-stats", async (req, res) => {
+      const customers = await usersCollection.estimatedDocumentCount();
+      const products = await menuCollection.estimatedDocumentCount();
+      const orders = await paymentCollection.estimatedDocumentCount();
+
+      // To get total order amount price, don't use reduce method. Try to use mongoDB aggregate method
+      
+
+      res.send({ customers, products, orders });
     });
 
     console.log(
